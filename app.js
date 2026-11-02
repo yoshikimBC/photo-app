@@ -146,10 +146,12 @@ function reduce(file) {
 
 let lastUrl = null;
 let lastId = null;
+let shotSettings = null;
 async function onCapture(file) {
   const date = new Date();
-  // 縮小や保存の途中で画面の設定が変わっても、撮影時点の内容で名前を付ける
-  const s = Object.assign({}, settings);
+  // カメラ操作や縮小の途中で画面の設定が変わっても、撮影ボタンを押した時点の内容で名前を付ける
+  const s = shotSettings || Object.assign({}, settings);
+  shotSettings = null;
   const id = crypto.randomUUID ? crypto.randomUUID()
     : Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
   let blob = file;
@@ -162,7 +164,7 @@ async function onCapture(file) {
   }
   const mime = blob.type || 'image/jpeg';
   const meta = {
-    id, mime, createdAt: date.getTime(),
+    id, mime, createdAt: date.getTime(), subject: s.subject,
     name: buildName(s, date, extOf(mime), id),
     subfolder: buildSubfolder(s, date)
   };
@@ -303,6 +305,7 @@ async function flush() {
       // サーバーの保存完了を確認してから端末側を消す
       await dequeue(item.id);
       addSent(result.name || item.name);
+      resetAfterSent(item);
       await render();
     }
   } catch (e) {
@@ -311,6 +314,22 @@ async function flush() {
     sending = false;
     render();
   }
+}
+
+// 送信完了で画面を撮影前に戻す。送信中に次の件名を入力していた場合は消さない
+function resetAfterSent(item) {
+  if (item.subject && settings.subject === item.subject) {
+    settings.subject = '';
+    $('subject').value = '';
+    save(SETTINGS_KEY, settings);
+  }
+  if (item.id !== lastId) return;
+  lastId = null;
+  $('last').hidden = true;
+  $('last-img').removeAttribute('src');
+  $('last-name').textContent = '';
+  URL.revokeObjectURL(lastUrl);
+  lastUrl = null;
 }
 
 function addSent(name) {
@@ -361,8 +380,7 @@ function renderStatus() {
 
   if (!lastId) return;
   const state = $('last-state');
-  if (!queueIds.includes(lastId)) setState(state, '送信完了(Driveへの保存を確認済み)', 'ok');
-  else if (progress && progress.id === lastId) setState(state, progress.phase === 'confirm' ? '保存を確認中' : '送信中');
+  if (progress && progress.id === lastId) setState(state, progress.phase === 'confirm' ? '保存を確認中' : '送信中');
   else setState(state, '未送信', lastError ? 'error' : 'warn');
 }
 
@@ -424,6 +442,10 @@ bind('folder-mode', 'folderMode', 'value', 'change');
 bind('size-mode', 'sizeMode', 'value', 'change');
 bind('endpoint', 'endpoint', 'value', 'input');
 bind('token', 'token', 'value', 'input');
+
+$('camera').addEventListener('click', () => {
+  shotSettings = Object.assign({}, settings);
+});
 
 $('camera').addEventListener('change', async (ev) => {
   const file = ev.target.files[0];
