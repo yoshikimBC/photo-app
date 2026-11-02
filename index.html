@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>業務写真</title>
+  <meta name="theme-color" content="#1f5d4c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="業務写真">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="icon" href="icon-192.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>業務写真</h1>
+    <div id="status" role="status"></div>
+  </header>
+
+  <main>
+    <section id="notice" class="notice" hidden></section>
+
+    <label class="field">
+      <span>件名(任意)</span>
+      <input id="subject" type="text" list="subject-history" maxlength="60" placeholder="例: 2号機点検" autocomplete="off">
+      <datalist id="subject-history"></datalist>
+    </label>
+
+    <div class="toggles">
+      <label><input id="use-date" type="checkbox"> 日付</label>
+      <label><input id="use-time" type="checkbox"> 時刻</label>
+      <label><input id="use-subject" type="checkbox"> 件名</label>
+    </div>
+
+    <p class="preview">ファイル名: <span id="name-preview"></span></p>
+
+    <label id="shoot" class="shoot">
+      <input id="camera" type="file" accept="image/*" capture="environment" hidden>
+      撮影する
+    </label>
+
+    <div id="last" class="last" hidden>
+      <img id="last-img" alt="直前に撮影した写真">
+      <span id="last-name"></span>
+    </div>
+
+    <section>
+      <h2>未送信</h2>
+      <ul id="queue" class="list"></ul>
+      <button id="retry" type="button" class="secondary">今すぐ送信</button>
+    </section>
+
+    <section>
+      <h2>送信済み(直近20件)</h2>
+      <ul id="sent" class="list"></ul>
+    </section>
+
+    <details id="settings">
+      <summary>設定</summary>
+      <label class="field">
+        <span>保存先フォルダの分け方</span>
+        <select id="folder-mode">
+          <option value="none">分けない</option>
+          <option value="month">年月別</option>
+          <option value="day">日付別</option>
+          <option value="subject">件名別</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>写真サイズ</span>
+        <select id="size-mode">
+          <option value="original">元のまま</option>
+          <option value="reduced">縮小(長辺2560px。撮影情報は消えます)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>送信先URL</span>
+        <input id="endpoint" type="url" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>合言葉</span>
+        <input id="token" type="password" autocomplete="off">
+      </label>
+      <button id="ping" type="button" class="secondary">接続テスト</button>
+      <p id="ping-result" class="preview"></p>
+    </details>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
