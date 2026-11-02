@@ -6,6 +6,10 @@ const SENT_KEY = 'photoapp.sent';
 const SUBJECTS_KEY = 'photoapp.subjects';
 const RETRY_MS = 30000;
 const UPLOAD_TIMEOUT_MS = 180000;
+const CHECK_START_MS = 15000;
+const CHECK_EVERY_MS = 15000;
+const CHECK_TIMEOUT_MS = 30000;
+const DB_TIMEOUT_MS = 30000;
 const REDUCED_LONG_SIDE = 2560;
 
 const defaults = {
@@ -37,7 +41,10 @@ function db() {
         req.result.createObjectStore('queue', { keyPath: 'id' });
         req.result.createObjectStore('bodies');
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        req.result.onclose = () => { dbPromise = null; };
+        resolve(req.result);
+      };
       req.onerror = () => reject(req.error);
     });
   }
@@ -45,12 +52,30 @@ function db() {
 }
 function tx(stores, mode, fn) {
   return db().then((d) => new Promise((resolve, reject) => {
-    const t = d.transaction(stores, mode);
-    let result;
-    fn(t, (v) => { result = v; });
-    t.oncomplete = () => resolve(result);
-    t.onerror = () => reject(t.error);
-    t.onabort = () => reject(t.error);
+    // 接続が応答しなくなっても待ち続けず、次回は接続を作り直す
+    const timer = setTimeout(() => {
+      dbPromise = null;
+      d.close();
+      reject(new Error('端末内のデータが応答しません'));
+    }, DB_TIMEOUT_MS);
+    const fail = (err) => {
+      clearTimeout(timer);
+      reject(err);
+    };
+    try {
+      const t = d.transaction(stores, mode);
+      let result;
+      fn(t, (v) => { result = v; });
+      t.oncomplete = () => {
+        clearTimeout(timer);
+        resolve(result);
+      };
+      t.onerror = () => fail(t.error);
+      t.onabort = () => fail(t.error);
+    } catch (e) {
+      dbPromise = null;
+      fail(e);
+    }
   }));
 }
 const enqueue = (meta, buffer) => tx(['queue', 'bodies'], 'readwrite', (t) => {
@@ -120,6 +145,7 @@ function reduce(file) {
 }
 
 let lastUrl = null;
+let lastId = null;
 async function onCapture(file) {
   const date = new Date();
   // 縮小や保存の途中で画面の設定が変わっても、撮影時点の内容で名前を付ける
@@ -149,6 +175,7 @@ async function onCapture(file) {
   $('last-img').src = lastUrl;
   $('last-name').textContent = meta.name;
   $('last').hidden = false;
+  lastId = id;
   await render();
   flush();
 }
@@ -171,9 +198,8 @@ function toBase64(buffer) {
   });
 }
 
-async function post(payload) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), UPLOAD_TIMEOUT_MS);
+async function post(payload, timeoutMs = CHECK_TIMEOUT_MS, ctrl = new AbortController()) {
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     // text/plain にしないと Apps Script が受け付けない事前確認(CORS)が発生する
     const res = await fetch(settings.endpoint, {
@@ -190,8 +216,78 @@ async function post(payload) {
   }
 }
 
+async function findSaved(item) {
+  try {
+    const r = await post({
+      token: settings.token, check: true, id: item.id, name: item.name, subfolder: item.subfolder
+    });
+    return r.saved === true ? r : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// 応答を受け取れない場合も、サーバーに保存の有無を問い合わせて結果を確定する
+async function sendItem(item) {
+  const startedAt = Date.now();
+  progress = { id: item.id, startedAt, phase: 'upload' };
+  render();
+  const ctrl = new AbortController();
+  let watchdog;
+  try {
+    if (attempted.has(item.id)) {
+      const saved = await findSaved(item);
+      if (saved) return saved;
+    }
+    attempted.add(item.id);
+    const upload = post({
+      token: settings.token, id: item.id, name: item.name,
+      mime: item.mime, subfolder: item.subfolder, data: await toBase64(await readBody(item.id))
+    }, UPLOAD_TIMEOUT_MS, ctrl);
+    const confirmed = new Promise((resolve) => {
+      let nextCheck = Date.now() + CHECK_START_MS;
+      let checking = false;
+      watchdog = setInterval(async () => {
+        // 画面を閉じている間はタイマーが止まるため、実時間でも期限を判定する
+        if (Date.now() - startedAt > UPLOAD_TIMEOUT_MS) ctrl.abort();
+        renderStatus();
+        if (checking || Date.now() < nextCheck) return;
+        checking = true;
+        const saved = await findSaved(item);
+        checking = false;
+        nextCheck = Date.now() + CHECK_EVERY_MS;
+        if (saved) resolve(saved);
+      }, 1000);
+    });
+    return await Promise.race([upload, confirmed]);
+  } catch (e) {
+    if (e.message === 'unauthorized') throw e;
+    progress.phase = 'confirm';
+    render();
+    const saved = await findSaved(item);
+    if (saved) return saved;
+    throw e;
+  } finally {
+    clearInterval(watchdog);
+    ctrl.abort();
+    progress = null;
+  }
+}
+
+function describeError(e) {
+  if (e.message === 'unauthorized') return '合言葉が違います。設定を確認してください。';
+  if (e.name === 'SyntaxError') return '送信先から想定外の応答がありました。保存は確認できていません。送信先URLを確認してください。';
+  if (e.name === 'TypeError' || e.name === 'AbortError') {
+    return navigator.onLine === false ? ''
+      : '応答がなく、保存も確認できませんでした。自動で再送します(保存済みなら二重には保存しません)。';
+  }
+  return '送信エラー: ' + e.message;
+}
+
 let sending = false;
+let progress = null;
 let lastError = '';
+const attempted = new Set();
 async function flush() {
   if (sending) return;
   if (!settings.endpoint || !settings.token) {
@@ -203,20 +299,14 @@ async function flush() {
   render();
   try {
     for (const item of await listQueue()) {
-      const buffer = await readBody(item.id);
-      const result = await post({
-        token: settings.token, id: item.id, name: item.name,
-        mime: item.mime, subfolder: item.subfolder, data: await toBase64(buffer)
-      });
-      // サーバーの保存完了を受け取ってから端末側を消す
+      const result = await sendItem(item);
+      // サーバーの保存完了を確認してから端末側を消す
       await dequeue(item.id);
       addSent(result.name || item.name);
       await render();
     }
   } catch (e) {
-    // 通信できないだけなら再送を待つ。それ以外は再送しても直らないので表示する
-    if (e.message === 'unauthorized') lastError = '合言葉が違います。設定を確認してください。';
-    else if (e.name !== 'TypeError' && e.name !== 'AbortError') lastError = '送信エラー: ' + e.message;
+    lastError = describeError(e);
   } finally {
     sending = false;
     render();
@@ -245,11 +335,54 @@ function fillList(ul, names, emptyText) {
   }
 }
 
+function setState(el, text, cls) {
+  el.textContent = text;
+  el.classList.remove('ok', 'warn', 'error');
+  if (cls) el.classList.add(cls);
+}
+
+const stamp = (at) => {
+  const d = new Date(at);
+  return pad(d.getMonth() + 1) + '/' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+};
+
+let queueIds = [];
+function renderStatus() {
+  const n = queueIds.length;
+  const el = $('status');
+  if (!n) setState(el, '全て送信済み', 'ok');
+  else if (progress && progress.phase === 'confirm') setState(el, '保存を確認中 残り' + n + '件');
+  else if (progress) setState(el, '送信中 残り' + n + '件(' + Math.floor((Date.now() - progress.startedAt) / 1000) + '秒)');
+  else if (sending) setState(el, '送信中 残り' + n + '件');
+  else if (!settings.endpoint || !settings.token) setState(el, '未送信 ' + n + '件(未設定)', 'warn');
+  else if (navigator.onLine === false) setState(el, '未送信 ' + n + '件(圏外)', 'warn');
+  else if (lastError) setState(el, '送信失敗 ' + n + '件', 'error');
+  else setState(el, '未送信 ' + n + '件(再送待ち)', 'warn');
+
+  if (!lastId) return;
+  const state = $('last-state');
+  if (!queueIds.includes(lastId)) setState(state, '送信完了(Driveへの保存を確認済み)', 'ok');
+  else if (progress && progress.id === lastId) setState(state, progress.phase === 'confirm' ? '保存を確認中' : '送信中');
+  else setState(state, '未送信', lastError ? 'error' : 'warn');
+}
+
+let renderSeq = 0;
 async function render() {
-  const queue = await listQueue();
+  // 古い描画が新しい描画を上書きしないようにする
+  const seq = ++renderSeq;
+  let queue;
+  try {
+    queue = await listQueue();
+  } catch (e) {
+    if (seq === renderSeq) setState($('status'), '状態を確認できません', 'error');
+    return;
+  }
+  if (seq !== renderSeq) return;
+  queueIds = queue.map((q) => q.id);
   fillList($('queue'), queue.map((q) => q.name), 'ありません');
-  fillList($('sent'), load(SENT_KEY, []).map((s) => s.name), 'ありません');
+  fillList($('sent'), load(SENT_KEY, []).map((s) => stamp(s.at) + ' ' + s.name), 'ありません');
   $('retry').hidden = !queue.length;
+  $('retry').disabled = sending;
 
   const configured = settings.endpoint && settings.token;
   let notice = '';
@@ -258,9 +391,7 @@ async function render() {
   $('notice').textContent = notice;
   $('notice').hidden = !notice;
 
-  if (sending && queue.length) $('status').textContent = '送信中 残り' + queue.length + '件';
-  else if (queue.length) $('status').textContent = '未送信 ' + queue.length + '件(通信待ち)';
-  else $('status').textContent = '全て送信済み';
+  renderStatus();
 
   $('name-preview').textContent = buildName(settings, new Date(), 'jpg', 'xxxxxxxx');
 }
@@ -321,6 +452,7 @@ $('ping').addEventListener('click', async () => {
 });
 
 window.addEventListener('online', flush);
+window.addEventListener('offline', render);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) flush();
 });
