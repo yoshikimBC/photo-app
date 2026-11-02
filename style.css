@@ -88,8 +88,18 @@ input[type="text"], input[type="url"], input[type="password"], select {
   user-select: none;
 }
 .shoot:active { opacity: .85; }
-.last { display: flex; align-items: center; gap: 12px; margin-top: 12px; font-size: 13px; overflow-wrap: anywhere; min-width: 0; }
-.last img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; flex: none; }
+.photos { list-style: none; margin: 12px 0 0; padding: 0; }
+.card { display: flex; align-items: center; gap: 10px; padding: 10px; margin-bottom: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+.card img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; flex: none; }
+.card-body { flex: 1; min-width: 0; }
+.name-field { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+.name-field input { flex: 1; min-width: 0; width: 100%; min-height: 44px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 16px; }
+.name-field input:disabled { opacity: .7; }
+.name-field span { flex: none; font-size: 13px; color: var(--muted); }
+.card button { flex: none; padding: 8px 10px; }
+.send { width: 100%; min-height: 56px; margin-top: 4px; border: 0; border-radius: 12px; background: var(--accent); color: var(--accent-text); font-size: 18px; font-weight: 700; }
+.send:disabled { opacity: .5; }
+.send[hidden] { display: none; }
 .list { list-style: none; margin: 0 0 8px; padding: 0; font-size: 13px; }
 .list li { padding: 8px 10px; background: var(--card); border: 1px solid var(--line); border-bottom: 0; overflow-wrap: anywhere; }
 .list li:first-child { border-radius: 8px 8px 0 0; }

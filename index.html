@@ -21,38 +21,13 @@
   <main>
     <section id="notice" class="notice" hidden></section>
 
-    <label class="field">
-      <span>件名(任意)</span>
-      <input id="subject" type="text" list="subject-history" maxlength="60" placeholder="例: 2号機点検" autocomplete="off">
-      <datalist id="subject-history"></datalist>
-    </label>
-
-    <div class="toggles">
-      <label><input id="use-date" type="checkbox"> 日付</label>
-      <label><input id="use-time" type="checkbox"> 時刻</label>
-      <label><input id="use-subject" type="checkbox"> 件名</label>
-    </div>
-
-    <p class="preview">ファイル名: <span id="name-preview"></span></p>
-
     <label id="shoot" class="shoot">
       <input id="camera" type="file" accept="image/*" capture="environment" hidden>
       撮影する
     </label>
 
-    <div id="last" class="last" hidden>
-      <img id="last-img" alt="直前に撮影した写真">
-      <div>
-        <div id="last-name"></div>
-        <div id="last-state" class="state"></div>
-      </div>
-    </div>
-
-    <section>
-      <h2>未送信</h2>
-      <ul id="queue" class="list"></ul>
-      <button id="retry" type="button" class="secondary">今すぐ送信</button>
-    </section>
+    <ul id="photos" class="photos"></ul>
+    <button id="send" type="button" class="send" hidden>送信する</button>
 
     <section>
       <h2>送信済み(直近20件)</h2>
@@ -61,13 +36,18 @@
 
     <details id="settings">
       <summary>設定</summary>
+      <p class="preview">ファイル名の初期値に入れる項目</p>
+      <div class="toggles">
+        <label><input id="use-date" type="checkbox"> 日付</label>
+        <label><input id="use-time" type="checkbox"> 時刻</label>
+      </div>
+      <p class="preview">例: <span id="name-preview"></span></p>
       <label class="field">
         <span>保存先フォルダの分け方</span>
         <select id="folder-mode">
           <option value="none">分けない</option>
           <option value="month">年月別</option>
           <option value="day">日付別</option>
-          <option value="subject">件名別</option>
         </select>
       </label>
       <label class="field">
@@ -87,6 +67,7 @@
       </label>
       <button id="ping" type="button" class="secondary">接続テスト</button>
       <p id="ping-result" class="preview"></p>
+      <p class="preview">第4版</p>
     </details>
   </main>
 

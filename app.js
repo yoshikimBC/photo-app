@@ -3,7 +3,6 @@
 const $ = (id) => document.getElementById(id);
 const SETTINGS_KEY = 'photoapp.settings';
 const SENT_KEY = 'photoapp.sent';
-const SUBJECTS_KEY = 'photoapp.subjects';
 const RETRY_MS = 30000;
 const UPLOAD_TIMEOUT_MS = 180000;
 const CHECK_START_MS = 15000;
@@ -13,7 +12,7 @@ const DB_TIMEOUT_MS = 30000;
 const REDUCED_LONG_SIDE = 2560;
 
 const defaults = {
-  useDate: true, useTime: true, useSubject: true, subject: '',
+  useDate: true, useTime: true,
   folderMode: 'none', sizeMode: 'original', endpoint: '', token: ''
 };
 
@@ -30,6 +29,8 @@ function save(key, value) {
 }
 
 const settings = Object.assign({}, defaults, load(SETTINGS_KEY, {}));
+// 件名別フォルダは件名の廃止で選べなくなった
+if (settings.folderMode === 'subject') settings.folderMode = 'none';
 
 // IndexedDB: 一覧表示で写真本体を読まないよう、情報と本体を別ストアに置く
 let dbPromise;
@@ -82,6 +83,9 @@ const enqueue = (meta, buffer) => tx(['queue', 'bodies'], 'readwrite', (t) => {
   t.objectStore('queue').put(meta);
   t.objectStore('bodies').put(buffer, meta.id);
 });
+const updateMeta = (meta) => tx(['queue'], 'readwrite', (t) => {
+  t.objectStore('queue').put(meta);
+});
 const dequeue = (id) => tx(['queue', 'bodies'], 'readwrite', (t) => {
   t.objectStore('queue').delete(id);
   t.objectStore('bodies').delete(id);
@@ -95,26 +99,26 @@ const readBody = (id) => tx(['bodies'], 'readonly', (t, done) => {
   r.onsuccess = () => done(r.result);
 });
 
+// 送信ボタンが押された写真だけを送る。ready が無いのは自動送信だった旧版の未送信分
+const isReady = (item) => item.ready !== false;
+
 const pad = (n) => String(n).padStart(2, '0');
 const ymd = (d, sep) => [d.getFullYear(), pad(d.getMonth() + 1), pad(d.getDate())].join(sep);
 const hms = (d) => pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
 const clean = (s) => s.replace(/[\\/:*?"<>|\r\n\t]/g, '_').trim();
 
-function buildName(s, date, ext, id) {
+function buildStem(s, date, id) {
   const parts = [];
   if (s.useDate) parts.push(ymd(date, ''));
   if (s.useTime) parts.push(hms(date));
-  const subject = clean(s.subject);
-  if (s.useSubject && subject) parts.push(subject);
   if (!parts.length) parts.push('photo_' + id.slice(0, 8));
-  return parts.join('_') + '.' + ext;
+  return parts.join('_');
 }
 
 function buildSubfolder(s, date) {
   switch (s.folderMode) {
     case 'month': return ymd(date, '-').slice(0, 7);
     case 'day': return ymd(date, '-');
-    case 'subject': return clean(s.subject);
     default: return '';
   }
 }
@@ -144,14 +148,10 @@ function reduce(file) {
   });
 }
 
-let lastUrl = null;
-let lastId = null;
-let shotSettings = null;
 async function onCapture(file) {
   const date = new Date();
-  // カメラ操作や縮小の途中で画面の設定が変わっても、撮影ボタンを押した時点の内容で名前を付ける
-  const s = shotSettings || Object.assign({}, settings);
-  shotSettings = null;
+  // 縮小や保存の途中で画面の設定が変わっても、撮影時点の内容で名前を付ける
+  const s = Object.assign({}, settings);
   const id = crypto.randomUUID ? crypto.randomUUID()
     : Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
   let blob = file;
@@ -163,32 +163,16 @@ async function onCapture(file) {
     }
   }
   const mime = blob.type || 'image/jpeg';
+  const stem = buildStem(s, date, id);
   const meta = {
-    id, mime, createdAt: date.getTime(), subject: s.subject,
-    name: buildName(s, date, extOf(mime), id),
+    id, mime, createdAt: date.getTime(), ready: false,
+    stem, defaultStem: stem, ext: extOf(mime),
+    name: stem + '.' + extOf(mime),
     subfolder: buildSubfolder(s, date)
   };
   // 端末のファイル参照は後で無効になることがあるため、中身を複製して保存する
   await enqueue(meta, await blob.arrayBuffer());
-  rememberSubject(s.subject);
-
-  if (lastUrl) URL.revokeObjectURL(lastUrl);
-  lastUrl = URL.createObjectURL(blob);
-  $('last-img').src = lastUrl;
-  $('last-name').textContent = meta.name;
-  $('last').hidden = false;
-  lastId = id;
   await render();
-  flush();
-}
-
-function rememberSubject(subject) {
-  const s = subject.trim();
-  if (!s) return;
-  const list = load(SUBJECTS_KEY, []).filter((x) => x !== s);
-  list.unshift(s);
-  save(SUBJECTS_KEY, list.slice(0, 20));
-  renderSubjects();
 }
 
 function toBase64(buffer) {
@@ -300,12 +284,14 @@ async function flush() {
   lastError = '';
   render();
   try {
-    for (const item of await listQueue()) {
+    // 送信中に押された分も続けて送るため、1枚ごとに読み直す
+    for (;;) {
+      const item = (await listQueue()).find(isReady);
+      if (!item) break;
       const result = await sendItem(item);
       // サーバーの保存完了を確認してから端末側を消す
       await dequeue(item.id);
       addSent(result.name || item.name);
-      resetAfterSent(item);
       await render();
     }
   } catch (e) {
@@ -316,20 +302,16 @@ async function flush() {
   }
 }
 
-// 送信完了で画面を撮影前に戻す。送信中に次の件名を入力していた場合は消さない
-function resetAfterSent(item) {
-  if (item.subject && settings.subject === item.subject) {
-    settings.subject = '';
-    $('subject').value = '';
-    save(SETTINGS_KEY, settings);
+// 未送信の写真のファイル名を確定して、送信の対象にする
+async function sendAll() {
+  for (const item of await listQueue()) {
+    if (isReady(item)) continue;
+    const card = cards.get(item.id);
+    const stem = (card && clean(card.input.value)) || clean(item.stem) || item.defaultStem;
+    await updateMeta(Object.assign({}, item, { ready: true, stem, name: stem + '.' + item.ext }));
+    if (card) card.input.value = stem;
   }
-  if (item.id !== lastId) return;
-  lastId = null;
-  $('last').hidden = true;
-  $('last-img').removeAttribute('src');
-  $('last-name').textContent = '';
-  URL.revokeObjectURL(lastUrl);
-  lastUrl = null;
+  await flush();
 }
 
 function addSent(name) {
@@ -365,23 +347,97 @@ const stamp = (at) => {
   return pad(d.getMonth() + 1) + '/' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
 };
 
-let queueIds = [];
+// 入力中のファイル名が消えないよう、カードは作り直さず写真ごとに使い回す
+const cards = new Map();
+function createCard(item) {
+  const li = document.createElement('li');
+  li.className = 'card';
+  const img = document.createElement('img');
+  img.alt = '撮影した写真';
+  const body = document.createElement('div');
+  body.className = 'card-body';
+  const field = document.createElement('label');
+  field.className = 'name-field';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.maxLength = 100;
+  input.autocomplete = 'off';
+  input.setAttribute('aria-label', 'ファイル名');
+  input.value = item.stem || item.name.replace(/\.[^.]*$/, '');
+  const ext = document.createElement('span');
+  ext.textContent = '.' + (item.ext || item.name.split('.').pop());
+  field.append(input, ext);
+  const state = document.createElement('div');
+  state.className = 'state';
+  body.append(field, state);
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'secondary';
+  del.textContent = '削除';
+  li.append(img, body, del);
+
+  input.addEventListener('input', async () => {
+    const stem = clean(input.value);
+    if (!stem) return;
+    const current = (await listQueue()).find((q) => q.id === item.id);
+    if (current && !isReady(current)) await updateMeta(Object.assign({}, current, { stem, name: stem + '.' + current.ext }));
+  });
+  del.addEventListener('click', async () => {
+    if (!confirm('この写真を端末から削除します。よろしいですか。')) return;
+    await dequeue(item.id);
+    lastError = '';
+    render();
+  });
+
+  const card = { li, input, state, del, url: null };
+  readBody(item.id).then((buffer) => {
+    if (!buffer || !cards.has(item.id)) return;
+    card.url = URL.createObjectURL(new Blob([buffer], { type: item.mime }));
+    img.src = card.url;
+  }).catch(() => { /* 縮小表示なしでも送信はできる */ });
+  return card;
+}
+
+function renderCards(queue) {
+  const ul = $('photos');
+  const ids = new Set(queue.map((q) => q.id));
+  for (const [id, card] of cards) {
+    if (ids.has(id)) continue;
+    if (card.url) URL.revokeObjectURL(card.url);
+    card.li.remove();
+    cards.delete(id);
+  }
+  for (const item of queue) {
+    let card = cards.get(item.id);
+    if (!card) {
+      card = createCard(item);
+      cards.set(item.id, card);
+      ul.append(card.li);
+    }
+    const current = progress && progress.id === item.id;
+    card.input.disabled = isReady(item);
+    card.del.disabled = !!current;
+    if (current) setState(card.state, progress.phase === 'confirm' ? '保存を確認中' : '送信中');
+    else if (!isReady(item)) setState(card.state, '未送信');
+    else if (lastError) setState(card.state, '送信失敗', 'error');
+    else setState(card.state, '送信待ち', 'warn');
+  }
+}
+
+let readyCount = 0;
+let draftCount = 0;
 function renderStatus() {
-  const n = queueIds.length;
   const el = $('status');
-  if (!n) setState(el, '全て送信済み', 'ok');
+  const n = readyCount;
+  if (!n && !draftCount) setState(el, '全て送信済み', 'ok');
+  else if (!n) setState(el, '未送信 ' + draftCount + '件', 'warn');
   else if (progress && progress.phase === 'confirm') setState(el, '保存を確認中 残り' + n + '件');
   else if (progress) setState(el, '送信中 残り' + n + '件(' + Math.floor((Date.now() - progress.startedAt) / 1000) + '秒)');
   else if (sending) setState(el, '送信中 残り' + n + '件');
-  else if (!settings.endpoint || !settings.token) setState(el, '未送信 ' + n + '件(未設定)', 'warn');
-  else if (navigator.onLine === false) setState(el, '未送信 ' + n + '件(圏外)', 'warn');
+  else if (!settings.endpoint || !settings.token) setState(el, '送信待ち ' + n + '件(未設定)', 'warn');
+  else if (navigator.onLine === false) setState(el, '送信待ち ' + n + '件(圏外)', 'warn');
   else if (lastError) setState(el, '送信失敗 ' + n + '件', 'error');
-  else setState(el, '未送信 ' + n + '件(再送待ち)', 'warn');
-
-  if (!lastId) return;
-  const state = $('last-state');
-  if (progress && progress.id === lastId) setState(state, progress.phase === 'confirm' ? '保存を確認中' : '送信中');
-  else setState(state, '未送信', lastError ? 'error' : 'warn');
+  else setState(el, '送信待ち ' + n + '件', 'warn');
 }
 
 let renderSeq = 0;
@@ -396,32 +452,26 @@ async function render() {
     return;
   }
   if (seq !== renderSeq) return;
-  queueIds = queue.map((q) => q.id);
-  fillList($('queue'), queue.map((q) => q.name), 'ありません');
+  readyCount = queue.filter(isReady).length;
+  draftCount = queue.length - readyCount;
+  renderCards(queue);
   fillList($('sent'), load(SENT_KEY, []).map((s) => stamp(s.at) + ' ' + s.name), 'ありません');
-  $('retry').hidden = !queue.length;
-  $('retry').disabled = sending;
+
+  const send = $('send');
+  send.hidden = !queue.length;
+  send.textContent = '送信する(' + queue.length + '件)';
+  send.disabled = sending && !draftCount;
 
   const configured = settings.endpoint && settings.token;
   let notice = '';
-  if (!configured) notice = '送信先URLと合言葉が未設定です。撮影した写真は端末に保存され、設定後に送信します。';
+  if (!configured) notice = '送信先URLと合言葉が未設定です。設定後に送信できます。';
   else if (lastError) notice = lastError;
   $('notice').textContent = notice;
   $('notice').hidden = !notice;
 
   renderStatus();
 
-  $('name-preview').textContent = buildName(settings, new Date(), 'jpg', 'xxxxxxxx');
-}
-
-function renderSubjects() {
-  const dl = $('subject-history');
-  dl.replaceChildren();
-  for (const s of load(SUBJECTS_KEY, [])) {
-    const o = document.createElement('option');
-    o.value = s;
-    dl.append(o);
-  }
+  $('name-preview').textContent = buildStem(settings, new Date(), 'xxxxxxxx') + '.jpg';
 }
 
 function bind(id, key, prop, event) {
@@ -434,18 +484,12 @@ function bind(id, key, prop, event) {
   });
 }
 
-bind('subject', 'subject', 'value', 'input');
 bind('use-date', 'useDate', 'checked', 'change');
 bind('use-time', 'useTime', 'checked', 'change');
-bind('use-subject', 'useSubject', 'checked', 'change');
 bind('folder-mode', 'folderMode', 'value', 'change');
 bind('size-mode', 'sizeMode', 'value', 'change');
 bind('endpoint', 'endpoint', 'value', 'input');
 bind('token', 'token', 'value', 'input');
-
-$('camera').addEventListener('click', () => {
-  shotSettings = Object.assign({}, settings);
-});
 
 $('camera').addEventListener('change', async (ev) => {
   const file = ev.target.files[0];
@@ -459,7 +503,12 @@ $('camera').addEventListener('change', async (ev) => {
   }
 });
 
-$('retry').addEventListener('click', flush);
+$('send').addEventListener('click', () => {
+  sendAll().catch((e) => {
+    lastError = describeError(e);
+    render();
+  });
+});
 
 $('ping').addEventListener('click', async () => {
   const out = $('ping-result');
@@ -483,5 +532,4 @@ setInterval(flush, RETRY_MS);
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 
-renderSubjects();
 render().then(flush);
